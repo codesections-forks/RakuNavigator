@@ -12,7 +12,7 @@ sub parse-code( Str $source ) {
     # Parsing logic from https://github.com/Raku/Raku-Parser/blob/master/lib/Perl6/Parser.pm6
 
     my $*LINEPOSCACHE;
-    
+
     my $compiler := nqp::getcomp('perl6');
 
     if (!$compiler) {
@@ -29,7 +29,7 @@ sub parse-code( Str $source ) {
 
     my $munged-source = $source;
     # Replace BEGIN/CHECK blocks, but only if they start the line or follow a semicolon
-    # This will mess with the phaser list in the outline. 
+    # This will mess with the phaser list in the outline.
     $munged-source ~~ s:Perl5:g:m:sigspace/((?:^|;|})[ \t]*)BEGIN(?=\s)/{$0}ENTER/;
     $munged-source ~~ s:Perl5:g:m:sigspace/((?:^|;|})[ \t]*)CHECK(?=\s)/{$0}ENTER/;
 
@@ -47,51 +47,9 @@ sub parse-code( Str $source ) {
     return $parsed;
 }
 
-my $parsed;
-
-
-try {
-    # Warnings are not always capture in @worries. How do we get those?
-    $parsed = parse-code($code);
-}
-
-if ($!) {
-    # We check a number of fields hunting for the error
-    # If we can't find it, we'll drop the gist of $! back at the first line
-    my $bFoundError = 0; 
-
-    if ($!.can('sorrows')) {
-        $bFoundError = 1;
-        for $!.sorrows -> $sorrow {
-            format-exc($sorrow, 1);
-        }
-    }
-
-    if ($!.can('panic')) {
-        $bFoundError = 1;
-        format-exc($!.panic, 1);
-    }
-
-    if ($!.can('worries')) {
-        $bFoundError = 1;
-        for $!.worries -> $worry {
-            format-exc($worry, 0);
-        }
-    }
-
-    if ($!.can('message') and $!.can('line')) {
-        $bFoundError = 1;
-        print-exc($!.message, $!.line, 1);
-    }
-    
-    if ($bFoundError == 0) {
-        say "Could not figure out the error structure of" ~ $!.WHO;
-        my $message = $!.gist();
-        print-exc($message, 0, 1);
-    }
-    say "~||~"; # Terminate final exception. Probably not needed
-    exit(1);
-}
+# Warnings are not always capture in @worries. How do we get those?
+my $parsed = try parse-code $code;
+if $! { print-exc $! }
 
 my $line_num = 0;
 my $last_to = 0;
@@ -114,7 +72,7 @@ for $parsed.hash.<statementlist>.hash.<statement>.list -> $k {
     my $var_continues = 0;
 
     match-constructs(@lines[0], $line_num, $cleanContent, $var_continues);
-    
+
     loop (my $j = 1; $j < @lines.elems(); $j++) {
         # Intentionally Skip first line where definition is.
         match-constructs(@lines[$j], $line_num + $j, @lines[$j], $var_continues);
@@ -141,7 +99,7 @@ sub match-constructs ($stmt_in, $line_number, $content, $var_continues is rw) {
     if (!$stmt) {
         $var_continues = 0;
         return;
-    } 
+    }
 
 
     if ($var_continues or $stmt ~~ m:P5/^(?:my|our|let|state)\b/) {
@@ -151,13 +109,13 @@ sub match-constructs ($stmt_in, $line_number, $content, $var_continues is rw) {
         $stmt ~~ s/^(my|our|let|state)\s+//;
         $stmt ~~ s/\s*\=.*//;
 
-        my @vars = ($stmt ~~ m:P5:g/([\$\@\%](?:[\w\-]|::)+)/); 
+        my @vars = ($stmt ~~ m:P5:g/([\$\@\%](?:[\w\-]|::)+)/);
 
         for @vars -> $var {
             make-tag($var, "v", '', $file-path, $line_number);
         }
 
-    } elsif   ($stmt ~~ m:P5/^multi\s+(?:(sub|method|submethod)\s+)?!?([\w\-]+)((?::[\w\-<>]+)?\s?\([^()]+\))/ # Grab signature for Multi-sub. 
+    } elsif   ($stmt ~~ m:P5/^multi\s+(?:(sub|method|submethod)\s+)?!?([\w\-]+)((?::[\w\-<>]+)?\s?\([^()]+\))/ # Grab signature for Multi-sub.
                  or $stmt ~~ m:P5/^(sub|method|submethod)\s+!?([\w\-]+)(:[\w\-<>]+)?/) {
         # Captures multi-dispatch details and signature in $details for display in the outline, different from the symbol name itself
 
@@ -165,10 +123,10 @@ sub match-constructs ($stmt_in, $line_number, $content, $var_continues is rw) {
         my $kind = (!defined($0) or $0 eq 'sub') ?? 's' !! 'o';
         my $details = $2 // '';
         make-tag($subName, $kind, $details, $file-path, "$line_number;$end_line");
-        
+
         $var_continues = ( $stmt !~~ m:P5/;/ and $stmt !~~ m:P5/[\)\=\}\x7b]/ );
-        
-        my @vars = ($stmt ~~ m:P5:g/([\$\@\%](?:[\w\-]|::)+)/); 
+
+        my @vars = ($stmt ~~ m:P5:g/([\$\@\%](?:[\w\-]|::)+)/);
         for @vars -> $var {
             make-tag($var, "v", '',$file-path, $line_number);
         }
@@ -207,27 +165,30 @@ sub make-tag($subName, $kind, $details, $file-path, $lines){
     print "$subName\t$kind\t$details\t$file-path\t$lines\n";
 }
 
-sub format-exc ($exc, $level) {
-    if ($exc.can('message') and $exc.can('line') ) { # and $exc.can('filename')
-        print-exc($exc.message, $exc.line, $level);
-    } else {
-        my $message = $exc.gist();
-        print-exc($message, 0, $level);
-    }
-}
+sub print-exc(Exception $_) {
+    # We check a number of fields hunting for any defined errors
+    my @errors = [ |(.?worries, |.?message).map({ %(exc => $_, level => 0)}),
+                   |(.?sorrows, |.?panic  ).map({ %(exc => $_, level => 1)})
+                 ].grep: *.<exc>.defined;
 
-sub print-exc($message, $line, $level) {
-    my $resolvedLine = $line;
-
-    # Errors from some types appear to be located at the wrong spots, or I didn't find the correct attribute for $line
-    if $message ~~ m:s/used at lines? (\d+)/ {
-        $resolvedLine = $0;
-    }
-    if $message ~~ m:s/Could not find \S+ at line (\d+) in/ {
-        $resolvedLine = $0;
+    if not @errors { # If we can't find an error, we'll use the gist of $!
+        say "Could not figure out the error structure of" ~ $!.WHO;
+        @errors.push: %(exc => .gist, level => 1);
     }
 
-    say "~||~" ~ $resolvedLine ~ "~|~" ~ $level ~ "~|~" ~ $message;
+    my Str @output = @errors.map: -> (:$exc, :$level) {
+        my $message = $exc.?message // $exc.gist;
+
+        # Errors from some types appear to have the wrong .line (or I didn't find the correct attribute for $line)
+        # We fix this by getting the correct line from the message, when it's printed
+        my rule prefix { [used at lines?] || [Could not find \S+ at line] };
+        my $line = ($message ~~ / <prefix> $<line>=(\S+) /) // $exc.?line // 0;
+
+        ($line, $level, "$message\n").join: '~|~'
+    }
+
+    # Final `~||~` is probably not needed
+    say "~||~@output.join('~||~')~||~" and exit 1;
 }
 
 # TODO: Figure out how to make symbol table parsing work
